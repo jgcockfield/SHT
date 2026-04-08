@@ -1,69 +1,51 @@
-import json
-from src.logger import log_info, log_warning
+from src.logger import log_info
 
 
-def get_tradeable_tokens(market):
+def get_mm_orders(opportunity):
     """
-    For mispricing strategy: return both YES and NO tokens
-    with their respective buy prices.
-    We buy YES at yes_price and NO at no_price.
-    At resolution one side pays $1.00 — guaranteed profit.
+    Calculate market making order prices for a token.
+    Places buy order just above best bid (to get filled first)
+    and sell order just below best ask.
+    Profit = sell_price - buy_price per share filled.
     """
-    raw_ids = market.get("clobTokenIds", "[]")
-    if isinstance(raw_ids, str):
-        token_ids = json.loads(raw_ids)
-    else:
-        token_ids = raw_ids
+    best_bid = opportunity["best_bid"]
+    best_ask = opportunity["best_ask"]
+    spread = opportunity["spread"]
+    tick = 0.01
 
-    if len(token_ids) < 2:
-        log_warning(
-            f"FILTER | Need 2 tokens, found {len(token_ids)} | "
-            f"{market.get('question', 'N/A')[:50]}"
+    # Place buy one tick above best bid
+    buy_price = round(best_bid + tick, 2)
+
+    # Place sell one tick below best ask
+    sell_price = round(best_ask - tick, 2)
+
+    # Verify still profitable after tick adjustments
+    if sell_price <= buy_price:
+        log_info(
+            f"FILTER | Spread too tight after tick adjustment | "
+            f"buy={buy_price} sell={sell_price}"
         )
-        return []
+        return None
 
-    yes_price = market.get("yes_price")
-    no_price = market.get("no_price")
-    combined = market.get("combined")
-    edge = market.get("edge")
-    liquidity = float(market.get("liquidityNum") or 0)
-
-    if yes_price is None or no_price is None:
-        log_warning(f"FILTER | Missing price data for {market.get('question', 'N/A')[:50]}")
-        return []
-
-    # YES token is index 0, NO token is index 1
-    yes_token = token_ids[0]
-    no_token = token_ids[1]
+    profit_per_share = round(sell_price - buy_price, 4)
+    profit_pct = round(profit_per_share / buy_price * 100, 2)
 
     log_info(
-        f"FILTER | Tradeable pair found | "
-        f"YES={yes_price} token={yes_token[:8]}... | "
-        f"NO={no_price} token={no_token[:8]}... | "
-        f"combined={combined} | edge={edge:.4f} | liq={liquidity:.0f}"
+        f"FILTER | MM orders calculated | "
+        f"token={opportunity['token_id'][:8]}... | "
+        f"buy={buy_price} sell={sell_price} | "
+        f"profit_per_share={profit_per_share} ({profit_pct}%)"
     )
 
-    orderbook = {
-        "best_bid": yes_price,
-        "best_ask": 1 - no_price,
-        "spread": market.get("spread", 0),
-        "bid_depth": liquidity / 2,
-        "ask_depth": liquidity / 2,
+    return {
+        "token_id": opportunity["token_id"],
+        "market_question": opportunity["market_question"],
+        "market_id": opportunity["market_id"],
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "profit_per_share": profit_per_share,
+        "profit_pct": profit_pct,
+        "spread": spread,
+        "bid_depth": opportunity["bid_depth"],
+        "ask_depth": opportunity["ask_depth"]
     }
-
-    return [
-        {
-            "token_id": yes_token,
-            "outcome": "YES",
-            "orderbook": orderbook,
-            "buy_price": yes_price,
-            "signal": "yes_leg"
-        },
-        {
-            "token_id": no_token,
-            "outcome": "NO",
-            "orderbook": orderbook,
-            "buy_price": no_price,
-            "signal": "no_leg"
-        }
-    ]

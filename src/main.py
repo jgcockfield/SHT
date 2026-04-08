@@ -1,8 +1,8 @@
 import time
 from src.logger import log_info, log_warning, log_error
-from src.scanner import get_new_markets
-from src.filter import get_tradeable_tokens
-from src.executor import execute_arb
+from src.scanner import find_market_making_opportunities
+from src.filter import get_mm_orders
+from src.executor import execute_mm_trade
 from src.wallet import get_client, has_sufficient_balance
 from config.settings import (
     SCAN_INTERVAL_SECONDS,
@@ -13,9 +13,9 @@ from config.settings import (
 
 def main():
     log_info("=" * 60)
-    log_info("SHT - Binary Mispricing Arb Agent Starting")
+    log_info("SHT - Market Making Agent Starting")
     log_info(f"Mode: {'PAPER TRADING' if PAPER_TRADING_MODE else 'LIVE TRADING'}")
-    log_info("Strategy: Buy YES + NO when combined price < 0.97")
+    log_info("Strategy: Place buy/sell limit orders around CLOB spread")
     log_info("=" * 60)
 
     client = get_client()
@@ -25,60 +25,49 @@ def main():
 
     trade_count = 0
     error_count = 0
-    seen_markets = set()
+    active_tokens = set()
 
     while True:
         try:
             log_info(f"MAIN | Scan #{trade_count + 1} starting...")
 
-            markets = get_new_markets()
+            opportunities = find_market_making_opportunities()
 
-            if not markets:
-                log_info("MAIN | No mispriced markets found this scan")
+            if not opportunities:
+                log_info("MAIN | No MM opportunities found this scan")
             else:
-                for market in markets:
-                    market_id = market.get("id", "")
+                for opp in opportunities:
+                    token_id = opp["token_id"]
 
-                    # Skip already traded markets this session
-                    if market_id in seen_markets:
+                    # Skip tokens already have active orders on
+                    if token_id in active_tokens:
+                        log_info(
+                            f"MAIN | Already active | "
+                            f"token={token_id[:8]}..."
+                        )
                         continue
 
-                    question = market.get("question", "N/A")
-                    yes_price = market.get("yes_price")
-                    no_price = market.get("no_price")
-                    edge = market.get("edge")
-
-                    log_info(
-                        f"MAIN | Mispriced market: {question[:50]} | "
-                        f"edge={edge:.4f}"
-                    )
-
-                    tokens = get_tradeable_tokens(market)
-
-                    if len(tokens) < 2:
-                        log_warning(f"MAIN | Could not get both tokens for: {question[:50]}")
+                    # Calculate order prices
+                    mm_order = get_mm_orders(opp)
+                    if mm_order is None:
                         continue
 
-                    yes_token = tokens[0]["token_id"]
-                    no_token = tokens[1]["token_id"]
-
-                    # Check balance for both legs
-                    required = (yes_price + no_price) * MAX_POSITION_SIZE
-                    if not has_sufficient_balance(client, required):
+                    # Check balance
+                    if not has_sufficient_balance(client, MAX_POSITION_SIZE):
                         log_warning("MAIN | Insufficient balance - skipping")
                         continue
 
-                    # Execute arb
-                    execute_arb(
-                        client,
-                        yes_token,
-                        no_token,
-                        yes_price,
-                        no_price,
-                        edge
+                    # Execute
+                    log_info(
+                        f"MAIN | Executing MM trade | "
+                        f"{mm_order['market_question']} | "
+                        f"buy={mm_order['buy_price']} "
+                        f"sell={mm_order['sell_price']} | "
+                        f"edge={mm_order['profit_pct']}%"
                     )
 
-                    seen_markets.add(market_id)
+                    execute_mm_trade(client, mm_order)
+                    active_tokens.add(token_id)
                     trade_count += 1
 
         except KeyboardInterrupt:
@@ -95,6 +84,7 @@ def main():
         log_info(
             f"MAIN | Scan complete | "
             f"trades={trade_count} | "
+            f"active_tokens={len(active_tokens)} | "
             f"errors={error_count} | "
             f"sleeping {SCAN_INTERVAL_SECONDS}s"
         )

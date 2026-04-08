@@ -31,8 +31,8 @@ def get_balance(client):
     Returns float balance or None on failure.
     """
     try:
-        balance_data = client.get_balance()
-        balance = float(balance_data)
+        data = client.get_balance_allowance()
+        balance = float(data.get("balance", 0))
         log_info(f"WALLET | Balance: {balance} USDC")
         return balance
     except Exception as e:
@@ -43,7 +43,12 @@ def get_balance(client):
 def has_sufficient_balance(client, order_size):
     """
     Check wallet has enough USDC for trade plus minimum reserve.
+    In paper trading mode always returns True.
     """
+    from config.settings import PAPER_TRADING_MODE
+    if PAPER_TRADING_MODE:
+        return True
+
     balance = get_balance(client)
 
     if balance is None:

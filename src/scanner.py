@@ -1,13 +1,13 @@
 import requests
 from src.logger import log_info, log_error
-from config.settings import GAMMA_API_URL
+from config.settings import CLOB_API_URL, GAMMA_API_URL
 
 
-def get_new_markets():
+def get_market_candidates():
     """
-    Scan for binary markets where YES + NO price < 0.97.
-    This indicates mispricing — buying both sides guarantees
-    a profit at resolution since one side always pays $1.00.
+    Find markets with real CLOB liquidity on both sides.
+    Uses Gamma API to get candidate markets, then validates
+    against actual CLOB orderbook data.
     """
     try:
         url = f"{GAMMA_API_URL}/markets"
@@ -27,59 +27,127 @@ def get_new_markets():
 
         for market in markets:
             try:
-                best_bid = float(market.get("bestBid") or 0)
-                best_ask = float(market.get("bestAsk") or 0)
                 liquidity = float(market.get("liquidityNum") or 0)
                 volume = float(market.get("volume24hr") or 0)
                 accepting = market.get("acceptingOrders", False)
 
                 if not accepting:
                     continue
-
-                if liquidity < 1000:
+                if liquidity < 5000:
+                    continue
+                if volume < 500:
                     continue
 
-                if volume < 100:
-                    continue
-
-                # Core mispricing check
-                # In a binary market: YES + NO = 1.00
-                # bestBid on YES = price of YES
-                # bestBid on NO = 1 - bestAsk on YES
-                yes_price = best_bid
-                no_price = round(1 - best_ask, 4)
-                combined = round(yes_price + no_price, 4)
-
-                if combined >= 0.97:
-                    continue
-
-                edge = round(1 - combined, 4)
-
-                qualifying.append({
-                    **market,
-                    "yes_price": yes_price,
-                    "no_price": no_price,
-                    "combined": combined,
-                    "edge": edge
-                })
-
-                log_info(
-                    f"SCANNER | Mispricing found: "
-                    f"{market.get('question', 'N/A')[:50]} | "
-                    f"YES={yes_price} NO={no_price} "
-                    f"combined={combined} edge={edge:.4f}"
-                )
+                qualifying.append(market)
 
             except (KeyError, ValueError) as e:
                 log_error("scanner.parse_market", e)
                 continue
 
         log_info(
-            f"SCANNER | Scan complete | "
-            f"{len(qualifying)} mispriced markets found"
+            f"SCANNER | {len(qualifying)} candidate markets found"
         )
         return qualifying
 
     except requests.RequestException as e:
-        log_error("scanner.get_new_markets", e)
+        log_error("scanner.get_market_candidates", e)
         return []
+
+
+def get_clob_orderbook(token_id):
+    """
+    Fetch real CLOB orderbook for a token.
+    Returns orderbook dict or None.
+    """
+    try:
+        r = requests.get(
+            f"{CLOB_API_URL}/book",
+            params={"token_id": token_id},
+            timeout=10
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+
+        if not bids or not asks:
+            return None
+
+        best_bid = float(bids[0]["price"])
+        best_ask = float(asks[0]["price"])
+        spread = round(best_ask - best_bid, 4)
+
+        bid_depth = sum(float(b["size"]) for b in bids[:5])
+        ask_depth = sum(float(a["size"]) for a in asks[:5])
+
+        return {
+            "token_id": token_id,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "bid_depth": bid_depth,
+            "ask_depth": ask_depth,
+            "bids": bids[:5],
+            "asks": asks[:5]
+        }
+
+    except Exception as e:
+        log_error("scanner.get_clob_orderbook", e)
+        return None
+
+
+def find_market_making_opportunities():
+    """
+    Find tokens with real two-sided CLOB liquidity and
+    profitable spread for market making.
+    Min spread: 0.04 (4 cents) to ensure profit after
+    two limit orders.
+    """
+    candidates = get_market_candidates()
+    opportunities = []
+
+    for market in candidates:
+        import json
+        raw_ids = market.get("clobTokenIds", "[]")
+        if isinstance(raw_ids, str):
+            token_ids = json.loads(raw_ids)
+        else:
+            token_ids = raw_ids
+
+        for token_id in token_ids:
+            ob = get_clob_orderbook(token_id)
+
+            if ob is None:
+                continue
+
+            # Need real two-sided liquidity
+            if ob["bid_depth"] < 100:
+                continue
+            if ob["ask_depth"] < 100:
+                continue
+
+            # Need meaningful spread to profit from
+            if ob["spread"] < 0.04:
+                continue
+
+            # Price must be in active trading zone
+            mid = (ob["best_bid"] + ob["best_ask"]) / 2
+            if not (0.10 <= mid <= 0.90):
+                continue
+
+            ob["market_question"] = market.get("question", "N/A")[:50]
+            ob["market_id"] = market.get("id", "")
+            opportunities.append(ob)
+
+            log_info(
+                f"SCANNER | MM opportunity: "
+                f"{ob['market_question']} | "
+                f"bid={ob['best_bid']} ask={ob['best_ask']} "
+                f"spread={ob['spread']} | "
+                f"bid_depth={ob['bid_depth']:.0f} "
+                f"ask_depth={ob['ask_depth']:.0f}"
+            )
+
+    log_info(f"SCANNER | {len(opportunities)} MM opportunities found")
+    return opportunities
