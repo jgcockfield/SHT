@@ -2,8 +2,7 @@ import time
 from src.logger import log_info, log_warning, log_error
 from src.scanner import get_new_markets
 from src.filter import get_tradeable_tokens
-from src.executor import execute_trade
-from src.fallback import print_unresolved_summary
+from src.executor import execute_arb
 from src.wallet import get_client, has_sufficient_balance
 from config.settings import (
     SCAN_INTERVAL_SECONDS,
@@ -14,11 +13,11 @@ from config.settings import (
 
 def main():
     log_info("=" * 60)
-    log_info("SHT - FirstMinute Trader Starting")
+    log_info("SHT - Binary Mispricing Arb Agent Starting")
     log_info(f"Mode: {'PAPER TRADING' if PAPER_TRADING_MODE else 'LIVE TRADING'}")
+    log_info("Strategy: Buy YES + NO when combined price < 0.97")
     log_info("=" * 60)
 
-    # Initialize client
     client = get_client()
     if client is None:
         log_error("main", "Failed to initialize CLOB client. Exiting.")
@@ -26,67 +25,71 @@ def main():
 
     trade_count = 0
     error_count = 0
+    seen_markets = set()
 
     while True:
         try:
             log_info(f"MAIN | Scan #{trade_count + 1} starting...")
 
-            # Step 1 - scan for new markets
             markets = get_new_markets()
 
             if not markets:
-                log_info("MAIN | No qualifying markets found this scan")
+                log_info("MAIN | No mispriced markets found this scan")
             else:
                 for market in markets:
-                    question = market.get("question", "N/A")
-                    log_info(f"MAIN | Processing market: {question}")
+                    market_id = market.get("id", "")
 
-                    # Step 2 - filter for tradeable tokens
-                    tradeable_tokens = get_tradeable_tokens(market)
-
-                    if not tradeable_tokens:
-                        log_info(
-                            f"MAIN | No tradeable tokens for: {question}"
-                        )
+                    # Skip already traded markets this session
+                    if market_id in seen_markets:
                         continue
 
-                    for token in tradeable_tokens:
-                        token_id = token["token_id"]
-                        orderbook = token["orderbook"]
+                    question = market.get("question", "N/A")
+                    yes_price = market.get("yes_price")
+                    no_price = market.get("no_price")
+                    edge = market.get("edge")
 
-                        # Step 3 - check balance
-                        if not has_sufficient_balance(client, MAX_POSITION_SIZE):
-                            log_warning("MAIN | Insufficient balance - skipping")
-                            continue
+                    log_info(
+                        f"MAIN | Mispriced market: {question[:50]} | "
+                        f"edge={edge:.4f}"
+                    )
 
-                        # Step 4 - execute trade
-                        signal = token.get("signal", "up")
-                        log_info(
-                            f"MAIN | Executing trade | "
-                            f"token={token_id[:8]}... | "
-                            f"outcome={token['outcome']} | "
-                            f"signal={signal}"
-                        )
-                        execute_trade(client, token_id, orderbook, signal)
-                        trade_count += 1
+                    tokens = get_tradeable_tokens(market)
 
-            # Print unresolved summary every 10 scans
-            if trade_count > 0 and trade_count % 10 == 0:
-                print_unresolved_summary()
+                    if len(tokens) < 2:
+                        log_warning(f"MAIN | Could not get both tokens for: {question[:50]}")
+                        continue
+
+                    yes_token = tokens[0]["token_id"]
+                    no_token = tokens[1]["token_id"]
+
+                    # Check balance for both legs
+                    required = (yes_price + no_price) * MAX_POSITION_SIZE
+                    if not has_sufficient_balance(client, required):
+                        log_warning("MAIN | Insufficient balance - skipping")
+                        continue
+
+                    # Execute arb
+                    execute_arb(
+                        client,
+                        yes_token,
+                        no_token,
+                        yes_price,
+                        no_price,
+                        edge
+                    )
+
+                    seen_markets.add(market_id)
+                    trade_count += 1
 
         except KeyboardInterrupt:
             log_info("MAIN | Shutdown requested by user")
-            print_unresolved_summary()
             break
 
         except Exception as e:
             error_count += 1
             log_error("main.loop", e)
             if error_count >= 10:
-                log_error(
-                    "main.loop",
-                    "Too many errors - shutting down"
-                )
+                log_error("main.loop", "Too many errors - shutting down")
                 break
 
         log_info(

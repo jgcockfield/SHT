@@ -1,13 +1,13 @@
 import json
-from src.momentum import record_price, get_momentum, is_in_discovery_zone
 from src.logger import log_info, log_warning
 
 
 def get_tradeable_tokens(market):
     """
-    Extract tokens from market using Gamma API data.
-    Uses bestBid/bestAsk from Gamma directly — no CLOB orderbook call.
-    Applies momentum filter before passing to executor.
+    For mispricing strategy: return both YES and NO tokens
+    with their respective buy prices.
+    We buy YES at yes_price and NO at no_price.
+    At resolution one side pays $1.00 — guaranteed profit.
     """
     raw_ids = market.get("clobTokenIds", "[]")
     if isinstance(raw_ids, str):
@@ -15,67 +15,55 @@ def get_tradeable_tokens(market):
     else:
         token_ids = raw_ids
 
-    if not token_ids:
+    if len(token_ids) < 2:
         log_warning(
-            f"FILTER | No token IDs for market: "
-            f"{market.get('question', 'N/A')}"
-        )
-        return []
-
-    best_bid = float(market.get("bestBid") or 0)
-    best_ask = float(market.get("bestAsk") or 0)
-    spread = float(market.get("spread") or 1)
-    liquidity = float(market.get("liquidityNum") or 0)
-
-    # Build orderbook-compatible dict from Gamma data
-    orderbook = {
-        "best_bid": best_bid,
-        "best_ask": best_ask,
-        "spread": spread,
-        "bid_depth": liquidity / 2,
-        "ask_depth": liquidity / 2,
-    }
-
-    # Check discovery zone
-    if not is_in_discovery_zone(orderbook):
-        log_info(
-            f"FILTER | Market outside discovery zone | "
-            f"bid={best_bid} | "
+            f"FILTER | Need 2 tokens, found {len(token_ids)} | "
             f"{market.get('question', 'N/A')[:50]}"
         )
         return []
 
-    tradeable = []
+    yes_price = market.get("yes_price")
+    no_price = market.get("no_price")
+    combined = market.get("combined")
+    edge = market.get("edge")
+    liquidity = float(market.get("liquidityNum") or 0)
 
-    for i, token_id in enumerate(token_ids):
-        outcome = f"outcome_{i}"
+    if yes_price is None or no_price is None:
+        log_warning(f"FILTER | Missing price data for {market.get('question', 'N/A')[:50]}")
+        return []
 
-        # Record price for momentum tracking
-        mid = (best_bid + best_ask) / 2
-        record_price(token_id, mid)
+    # YES token is index 0, NO token is index 1
+    yes_token = token_ids[0]
+    no_token = token_ids[1]
 
-        # Check momentum signal
-        signal = get_momentum(token_id)
+    log_info(
+        f"FILTER | Tradeable pair found | "
+        f"YES={yes_price} token={yes_token[:8]}... | "
+        f"NO={no_price} token={no_token[:8]}... | "
+        f"combined={combined} | edge={edge:.4f} | liq={liquidity:.0f}"
+    )
 
-        if signal is None:
-            log_info(
-                f"FILTER | Building momentum history | "
-                f"outcome={outcome} | token={token_id[:8]}..."
-            )
-            continue
+    orderbook = {
+        "best_bid": yes_price,
+        "best_ask": 1 - no_price,
+        "spread": market.get("spread", 0),
+        "bid_depth": liquidity / 2,
+        "ask_depth": liquidity / 2,
+    }
 
-        tradeable.append({
-            "token_id": token_id,
-            "outcome": outcome,
+    return [
+        {
+            "token_id": yes_token,
+            "outcome": "YES",
             "orderbook": orderbook,
-            "signal": signal
-        })
-
-        log_info(
-            f"FILTER | Token passed | outcome={outcome} | "
-            f"token={token_id[:8]}... | "
-            f"signal={signal} | "
-            f"spread={spread:.3f} | liq={liquidity:.0f}"
-        )
-
-    return tradeable
+            "buy_price": yes_price,
+            "signal": "yes_leg"
+        },
+        {
+            "token_id": no_token,
+            "outcome": "NO",
+            "orderbook": orderbook,
+            "buy_price": no_price,
+            "signal": "no_leg"
+        }
+    ]

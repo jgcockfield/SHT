@@ -5,9 +5,9 @@ from config.settings import GAMMA_API_URL
 
 def get_new_markets():
     """
-    Fetch actively traded markets from Polymarket Gamma API.
-    Uses Gamma API spread/bid/ask directly — no CLOB call needed for filtering.
-    Targets markets in active price discovery (35-65% probability range).
+    Scan for binary markets where YES + NO price < 0.97.
+    This indicates mispricing — buying both sides guarantees
+    a profit at resolution since one side always pays $1.00.
     """
     try:
         url = f"{GAMMA_API_URL}/markets"
@@ -29,37 +29,45 @@ def get_new_markets():
             try:
                 best_bid = float(market.get("bestBid") or 0)
                 best_ask = float(market.get("bestAsk") or 0)
-                spread = float(market.get("spread") or 1)
                 liquidity = float(market.get("liquidityNum") or 0)
                 volume = float(market.get("volume24hr") or 0)
                 accepting = market.get("acceptingOrders", False)
 
-                # Must be accepting orders
                 if not accepting:
                     continue
 
-                # Must have tight spread
-                if spread > 0.05:
-                    continue
-
-                # Must be in contested probability zone
-                if not (0.35 <= best_bid <= 0.65):
-                    continue
-
-                # Must have real liquidity
                 if liquidity < 1000:
                     continue
 
-                # Must have real volume
                 if volume < 100:
                     continue
 
-                qualifying.append(market)
+                # Core mispricing check
+                # In a binary market: YES + NO = 1.00
+                # bestBid on YES = price of YES
+                # bestBid on NO = 1 - bestAsk on YES
+                yes_price = best_bid
+                no_price = round(1 - best_ask, 4)
+                combined = round(yes_price + no_price, 4)
+
+                if combined >= 0.97:
+                    continue
+
+                edge = round(1 - combined, 4)
+
+                qualifying.append({
+                    **market,
+                    "yes_price": yes_price,
+                    "no_price": no_price,
+                    "combined": combined,
+                    "edge": edge
+                })
+
                 log_info(
-                    f"SCANNER | Qualifying market: "
+                    f"SCANNER | Mispricing found: "
                     f"{market.get('question', 'N/A')[:50]} | "
-                    f"bid={best_bid} ask={best_ask} | "
-                    f"spread={spread:.3f} | liq={liquidity:.0f}"
+                    f"YES={yes_price} NO={no_price} "
+                    f"combined={combined} edge={edge:.4f}"
                 )
 
             except (KeyError, ValueError) as e:
@@ -68,7 +76,7 @@ def get_new_markets():
 
         log_info(
             f"SCANNER | Scan complete | "
-            f"{len(qualifying)} qualifying markets found"
+            f"{len(qualifying)} mispriced markets found"
         )
         return qualifying
 
