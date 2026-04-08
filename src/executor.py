@@ -11,14 +11,10 @@ from config.settings import (
 
 
 def place_buy(client, token_id, price, size):
-    """
-    Place a limit buy order.
-    In paper trading mode, simulates the order without submitting.
-    """
     try:
         if PAPER_TRADING_MODE:
             log_info(
-                f"PAPER | BUY | token={token_id} | "
+                f"PAPER | BUY | token={token_id[:8]}... | "
                 f"price={price} | size={size}"
             )
             return {"paper": True, "price": price, "size": size}
@@ -32,7 +28,7 @@ def place_buy(client, token_id, price, size):
         )
         result = client.create_and_post_order(order_args)
         log_info(
-            f"EXECUTOR | BUY placed | token={token_id} | "
+            f"EXECUTOR | BUY placed | token={token_id[:8]}... | "
             f"price={price} | size={size} | result={result}"
         )
         return result
@@ -43,14 +39,10 @@ def place_buy(client, token_id, price, size):
 
 
 def place_sell(client, token_id, price, size):
-    """
-    Place a limit sell order.
-    In paper trading mode, simulates the order without submitting.
-    """
     try:
         if PAPER_TRADING_MODE:
             log_info(
-                f"PAPER | SELL | token={token_id} | "
+                f"PAPER | SELL | token={token_id[:8]}... | "
                 f"price={price} | size={size}"
             )
             return {"paper": True, "price": price, "size": size}
@@ -64,7 +56,7 @@ def place_sell(client, token_id, price, size):
         )
         result = client.create_and_post_order(order_args)
         log_info(
-            f"EXECUTOR | SELL placed | token={token_id} | "
+            f"EXECUTOR | SELL placed | token={token_id[:8]}... | "
             f"price={price} | size={size} | result={result}"
         )
         return result
@@ -74,31 +66,35 @@ def place_sell(client, token_id, price, size):
         return None
 
 
-def execute_trade(client, token_id, orderbook):
+def execute_trade(client, token_id, orderbook, signal):
     """
-    Full trade execution flow:
-    1. Place buy at best ask
-    2. Place sell at buy_price + profit_buffer
-    3. Apply break-even fallback if sell times out
+    Execute trade in direction of momentum signal.
+    signal='up'   -> buy outcome_0 (YES)
+    signal='down' -> buy outcome_1 (NO) — price moving down means NO gaining
     """
-    best_ask = orderbook["best_ask"]
     best_bid = orderbook["best_bid"]
+    best_ask = orderbook["best_ask"]
     spread = orderbook["spread"]
     size = min(MAX_POSITION_SIZE, orderbook["ask_depth"])
     size = round(size, 2)
 
-    buy_price = best_ask
-    sell_price = round(buy_price + PROFIT_BUFFER, 4)
+    # Entry price — join best bid to stay maker
+    if signal == "up":
+        buy_price = round(best_bid + 0.001, 3)
+    else:
+        buy_price = round(best_ask - 0.001, 3)
+
+    sell_price = round(buy_price + PROFIT_BUFFER, 3)
     break_even = buy_price
 
     log_info(
-        f"EXECUTOR | Starting trade | token={token_id} | "
-        f"buy={buy_price} | sell={sell_price} | size={size}"
+        f"EXECUTOR | Trade starting | token={token_id[:8]}... | "
+        f"signal={signal} | buy={buy_price} | "
+        f"sell={sell_price} | size={size}"
     )
 
     # Place buy
     buy_result = place_buy(client, token_id, buy_price, size)
-
     if buy_result is None:
         log_error("executor.execute_trade", "Buy order failed")
         return
@@ -106,13 +102,11 @@ def execute_trade(client, token_id, orderbook):
     # Simulate fill in paper mode
     if PAPER_TRADING_MODE:
         log_info(f"PAPER | Buy filled at {buy_price}")
-        filled = True
     else:
         filled = check_fill(client, buy_result, timeout=60)
-
-    if not filled:
-        log_warning(f"EXECUTOR | Buy not filled | token={token_id}")
-        return
+        if not filled:
+            log_warning(f"EXECUTOR | Buy not filled | token={token_id[:8]}...")
+            return
 
     # Place profit-buffer sell
     sell_result = place_sell(client, token_id, sell_price, size)
@@ -131,7 +125,7 @@ def execute_trade(client, token_id, orderbook):
     if not sell_filled:
         log_warning(
             f"EXECUTOR | Sell timeout | Dropping to break-even | "
-            f"token={token_id}"
+            f"token={token_id[:8]}..."
         )
         cancel_order(client, sell_result)
         sell_result = place_sell(client, token_id, break_even, size)
@@ -144,7 +138,7 @@ def execute_trade(client, token_id, orderbook):
         if not sell_filled:
             log_warning(
                 f"EXECUTOR | Break-even not filled | "
-                f"Flagging for manual review | token={token_id}"
+                f"Flagging for manual review | token={token_id[:8]}..."
             )
             exit_type = "unresolved"
 
@@ -156,7 +150,7 @@ def execute_trade(client, token_id, orderbook):
     ) if sell_filled else 0
 
     log_trade(
-        market_id="N/A",
+        market_id=token_id[:16],
         token_id=token_id,
         buy_price=buy_price,
         sell_price=actual_sell,
@@ -170,16 +164,11 @@ def execute_trade(client, token_id, orderbook):
 
 
 def check_fill(client, order_result, timeout=60):
-    """
-    Poll order status until filled or timeout.
-    """
     if order_result is None:
         return False
-
     order_id = order_result.get("orderID") or order_result.get("id")
     if not order_id:
         return False
-
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -189,17 +178,12 @@ def check_fill(client, order_result, timeout=60):
         except Exception as e:
             log_error("executor.check_fill", e)
         time.sleep(5)
-
     return False
 
 
 def cancel_order(client, order_result):
-    """
-    Cancel an open order.
-    """
     if PAPER_TRADING_MODE or order_result is None:
         return
-
     try:
         order_id = order_result.get("orderID") or order_result.get("id")
         if order_id:

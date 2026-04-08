@@ -78,4 +78,12 @@ def is_tradeable(orderbook):
         )
         return False
 
+    # Also require minimum liquidity on both sides
+    ask_depth = orderbook.get("ask_depth", 0)
+    if ask_depth < MIN_LIQUIDITY_THRESHOLD:
+        log_warning(
+            f"FILTER | Insufficient ask depth: {ask_depth} < {MIN_LIQUIDITY_THRESHOLD}"
+        )
+        return False
+
     return True

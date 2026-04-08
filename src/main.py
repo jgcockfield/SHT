@@ -60,12 +60,14 @@ def main():
                             continue
 
                         # Step 4 - execute trade
+                        signal = token.get("signal", "up")
                         log_info(
                             f"MAIN | Executing trade | "
-                            f"token={token_id} | "
-                            f"outcome={token['outcome']}"
+                            f"token={token_id[:8]}... | "
+                            f"outcome={token['outcome']} | "
+                            f"signal={signal}"
                         )
-                        execute_trade(client, token_id, orderbook)
+                        execute_trade(client, token_id, orderbook, signal)
                         trade_count += 1
 
             # Print unresolved summary every 10 scans
